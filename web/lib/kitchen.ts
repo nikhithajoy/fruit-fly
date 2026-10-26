@@ -52,6 +52,17 @@ export const SURFACES: { name: string; tops: Box[]; spot: Vec3 }[] = [
   { name: "floor", tops: [], spot: [0.5, 0, -0.4] },
 ];
 
+// Camera viewpoints for the Views menu and the 1–7 keys: where the camera sits and what it looks at.
+export const VIEWS: { name: string; camera: Vec3; target: Vec3 }[] = [
+  { name: "Overview", camera: [1.8, 2.0, 1.3], target: [-0.3, 0.8, -0.6] },
+  { name: "Sink", camera: [-0.8, 1.55, -0.1], target: [-0.8, 0.9, -1.2] },
+  { name: "Stove", camera: [0.4, 1.55, -0.1], target: [0.4, 0.9, -1.2] },
+  { name: "Side counter", camera: [-0.5, 1.55, 0.1], target: [-1.7, 0.9, -0.2] },
+  { name: "Table", camera: [0.5, 1.6, 1.3], target: [0.5, 0.76, 0.5] },
+  { name: "Fridge", camera: [1.2, 2.3, 0.5], target: [1.4, 1.5, -1.1] },
+  { name: "Floor", camera: [1.7, 0.35, 1.3], target: [0.4, 0.15, 0.4] },
+];
+
 // What a point on a flat surface is resting on: "table", "stove", "floor"...
 export function surfaceName([x, y, z]: Vec3): string {
   if (Math.abs(x - STOVE.x) < STOVE.width / 2 && z > BACK_COUNTER.min[2] && y > COUNTER_TOP - 0.01

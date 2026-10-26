@@ -10,7 +10,7 @@ import GameHud from "@/components/hud/GameHud";
 import SimpleHud from "@/components/hud/SimpleHud";
 import { CREDITS, type Controls, type LogEntry } from "@/components/hud/shared";
 import { makeRandom } from "@/lib/brain";
-import { ROOM, SURFACES, firstHit, isFree, type Vec3 } from "@/lib/kitchen";
+import { ROOM, SURFACES, VIEWS, firstHit, isFree, type Vec3 } from "@/lib/kitchen";
 import type { SimState } from "@/lib/sim";
 
 const FOOD_RADIUS = 0.04;
@@ -86,19 +86,104 @@ const CAMERA_MAX = new THREE.Vector3(...ROOM.max).subScalar(CAMERA_MARGIN);
 
 const FOLLOW_DISTANCE = 0.6;  // m: the furthest the camera sits from the fly when following
 
-// Keeps the camera inside the kitchen. When following, it slides the orbit target
-// along with the fly and, like a third-person game camera, moves in closer whenever
-// furniture (say, the tabletop) would block the view, then eases back out.
-function CameraRig({ flyPosition, follow }: { flyPosition: THREE.Vector3; follow: boolean }) {
+const MOVE_SPEED = 1.2;       // m/s when moving with the keyboard
+// [forward, right, up] for each movement key
+const MOVE_KEYS: Record<string, [number, number, number]> = {
+  w: [1, 0, 0], arrowup: [1, 0, 0], s: [-1, 0, 0], arrowdown: [-1, 0, 0],
+  a: [0, -1, 0], arrowleft: [0, -1, 0], d: [0, 1, 0], arrowright: [0, 1, 0],
+  e: [0, 0, 1], q: [0, 0, -1],
+};
+const FLIGHT_SECONDS = 0.9;   // how long a jump to a preset view takes
+const UP = new THREE.Vector3(0, 1, 0);
+const easeInOut = (t: number) => (t < 0.5 ? 4 * t ** 3 : 1 - (-2 * t + 2) ** 3 / 2);
+
+type Flight = { fromCamera: THREE.Vector3; fromTarget: THREE.Vector3;
+                toCamera: THREE.Vector3; toTarget: THREE.Vector3; t: number };
+
+// Moves the camera: keyboard movement, smooth jumps to preset views, and following
+// the fly. It keeps the camera inside the kitchen. When following, it slides the orbit
+// target along with the fly and, like a third-person game camera, moves in closer
+// whenever furniture (say, the tabletop) would block the view, then eases back out.
+function CameraRig({ flyPosition, follow, view, onManualMove }: {
+  flyPosition: THREE.Vector3; follow: boolean;
+  view: { index: number; nonce: number } | null;   // a new nonce starts a jump
+  onManualMove: () => void;                         // the viewer moved the camera themselves
+}) {
   const controls = useThree((state) => state.controls) as unknown as
     { target: THREE.Vector3; update: () => void } | null;
+  const camera = useThree((state) => state.camera);
+  const canvas = useThree((state) => state.gl.domElement);
   const shift = useMemo(() => new THREE.Vector3(), []);
   const offset = useMemo(() => new THREE.Vector3(), []);
+  const forward = useMemo(() => new THREE.Vector3(), []);
+  const right = useMemo(() => new THREE.Vector3(), []);
+  const move = useMemo(() => new THREE.Vector3(), []);
   const wanted = useRef(FOLLOW_DISTANCE);   // distance the viewer chose, by zooming
   const placed = useRef(0);                  // distance we left the camera at last frame
+  const held = useRef(new Set<string>());    // movement keys being held down
+  const flight = useRef<Flight | null>(null);
 
-  useFrame(({ camera }) => {
+  const movedByHand = useEffectEvent(onManualMove);
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement).tagName === "INPUT" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const key = e.key.toLowerCase();
+      if (!(key in MOVE_KEYS)) return;
+      if (key.startsWith("arrow")) e.preventDefault();
+      held.current.add(key);
+      flight.current = null;
+      movedByHand();
+    };
+    const up = (e: KeyboardEvent) => held.current.delete(e.key.toLowerCase());
+    const release = () => held.current.clear();
+    // right-drag (or shift/ctrl-drag) pans, which also means "stop following"
+    const press = (e: PointerEvent) => {
+      if (e.button === 2 || e.shiftKey || e.ctrlKey || e.metaKey) movedByHand();
+    };
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", release);
+    canvas.addEventListener("pointerdown", press);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", release);
+      canvas.removeEventListener("pointerdown", press);
+    };
+  }, [canvas]);
+
+  useEffect(() => {
+    if (!view || !controls) return;
+    const { camera: to, target } = VIEWS[view.index];
+    flight.current = {
+      fromCamera: camera.position.clone(), fromTarget: controls.target.clone(),
+      toCamera: new THREE.Vector3(...to), toTarget: new THREE.Vector3(...target), t: 0,
+    };
+  }, [view, controls, camera]);
+
+  useFrame((_, delta) => {
     if (!controls) return;
+    const jump = flight.current;
+    if (jump) {
+      jump.t = Math.min(1, jump.t + delta / FLIGHT_SECONDS);
+      const k = easeInOut(jump.t);
+      camera.position.lerpVectors(jump.fromCamera, jump.toCamera, k);
+      controls.target.lerpVectors(jump.fromTarget, jump.toTarget, k);
+      if (jump.t === 1) flight.current = null;
+    } else if (held.current.size) {
+      forward.copy(controls.target).sub(camera.position).setY(0).normalize();
+      right.crossVectors(forward, UP);
+      move.set(0, 0, 0);
+      for (const key of held.current) {
+        const [f, r, u] = MOVE_KEYS[key];
+        move.addScaledVector(forward, f).addScaledVector(right, r).addScaledVector(UP, u);
+      }
+      if (move.lengthSq() > 0) {
+        move.normalize().multiplyScalar(MOVE_SPEED * Math.min(delta, 0.1));
+        camera.position.add(move);
+        controls.target.add(move);
+      }
+    }
     if (follow) {
       shift.copy(flyPosition).sub(controls.target).multiplyScalar(0.08);
       controls.target.add(shift);
@@ -115,6 +200,7 @@ function CameraRig({ flyPosition, follow }: { flyPosition: THREE.Vector3; follow
       const next = Math.min(clear, distance + 0.02);    // snap in, ease out
       camera.position.copy(controls.target).add(offset.setLength(next));
     }
+    controls.target.clamp(CAMERA_MIN, CAMERA_MAX);
     camera.position.clamp(CAMERA_MIN, CAMERA_MAX);
     controls.update();
     placed.current = camera.position.distanceTo(controls.target);
@@ -128,7 +214,9 @@ const TRAIL_LENGTH = 150;    // mini-map trail points, sampled 10 times a second
 const LOG_LENGTH = 200;      // console lines kept
 
 const HELP = "Commands: pause, resume, follow, unfollow, reset, drop food <place>, remove food, " +
-  `clear, about, exit. Places: ${SURFACES.map((s) => s.name).join(", ")}.`;
+  `go <view>, clear, about, exit. Places: ${SURFACES.map((s) => s.name).join(", ")}. ` +
+  `Views (or keys 1–${VIEWS.length}): ${VIEWS.map((v) => v.name.toLowerCase()).join(", ")}. ` +
+  "Move the camera with WASD, Q and E; scroll to zoom toward the cursor.";
 
 export default function Home() {
   const stateRef = useRef<SimState | null>(null);
@@ -146,6 +234,7 @@ export default function Home() {
   const [panelState, setPanelState] = useState<SimState | null>(null);
   const [trail, setTrail] = useState<Vec3[]>([]);
   const [log, setLog] = useState<LogEntry[]>([]);
+  const [view, setView] = useState<{ index: number; nonce: number } | null>(null);
 
   useEffect(() => {
     const worker = new Worker(new URL("../lib/sim.worker.ts", import.meta.url), { type: "module" });
@@ -193,6 +282,11 @@ export default function Home() {
     post({ type: value ? "pause" : "resume" });
   }
 
+  function goToView(index: number) {
+    setFollow(false);
+    setView((v) => ({ index, nonce: (v?.nonce ?? 0) + 1 }));
+  }
+
   const controls: Controls = {
     paused,
     follow,
@@ -201,6 +295,7 @@ export default function Home() {
     reset: () => post({ type: "reset" }),
     removeFood,
     toggleGameMode: () => setGameMode((g) => !g),
+    goToView,
   };
 
   function addLog(...entries: LogEntry[]) {
@@ -218,6 +313,13 @@ export default function Home() {
       const surface = SURFACES.find((s) => s.name === place);
       if (surface) dropFood(surface.spot);
       else say(`There's no "${place}". Try: ${SURFACES.map((s) => s.name).join(", ")}.`);
+      return;
+    }
+    const viewName = text.match(/^(?:go|goto|view)(?: to)?(?: the)? (.+)$/)?.[1];
+    if (viewName) {
+      const index = VIEWS.findIndex((v) => v.name.toLowerCase() === viewName);
+      if (index >= 0) goToView(index);
+      else say(`There's no "${viewName}" view. Try: ${VIEWS.map((v) => v.name.toLowerCase()).join(", ")}.`);
       return;
     }
     switch (text) {
@@ -253,6 +355,7 @@ export default function Home() {
     else if (key === "r") controls.reset();
     else if (key === "x") removeFood();
     else if (key === "g") controls.toggleGameMode();
+    else if (/^[1-9]$/.test(key) && Number(key) <= VIEWS.length) goToView(Number(key) - 1);
     else if (key === "`" && gameMode) setConsoleOpen((open) => !open);
     else if (key === "enter" && gameMode && consoleOpen) document.getElementById("console-input")?.focus();
   });
@@ -276,7 +379,7 @@ export default function Home() {
   return (
     <main style={{ width: "100vw", height: "100vh", position: "relative", background: "#111",
                    overflow: "hidden", cursor: hover ? "pointer" : "default" }}>
-      <Canvas shadows camera={{ position: [1.8, 2.0, 1.3], fov: 60, near: 0.01, far: 20 }}>
+      <Canvas shadows camera={{ position: VIEWS[0].camera, fov: 60, near: 0.01, far: 20 }}>
         <color attach="background" args={["#f1ead9"]} />
         <ambientLight intensity={0.35} />
         <hemisphereLight args={["#fff8ee", "#8a7a66", 0.5]} />
@@ -289,9 +392,10 @@ export default function Home() {
         {hover && <PlacementMarker at={hover} />}
         {food && <Food at={food} />}
         <Fly stateRef={stateRef} position={flyPosition} paused={paused} />
-        <OrbitControls makeDefault target={[-0.3, 0.8, -0.6]} maxPolarAngle={Math.PI / 2.05}
-                       minDistance={follow ? 0.05 : 0.15} maxDistance={4} />
-        <CameraRig flyPosition={flyPosition} follow={follow} />
+        <OrbitControls makeDefault target={VIEWS[0].target} maxPolarAngle={Math.PI / 2.05}
+                       minDistance={follow ? 0.05 : 0.15} maxDistance={4} zoomToCursor />
+        <CameraRig flyPosition={flyPosition} follow={follow} view={view}
+                   onManualMove={() => setFollow(false)} />
       </Canvas>
       {/* the HUD lets clicks through to the kitchen except on its own panels */}
       <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>

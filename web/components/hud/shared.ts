@@ -9,7 +9,12 @@ export type Controls = {
   reset: () => void;
   removeFood: () => void;
   toggleGameMode: () => void;
+  goToView: (index: number) => void;     // jump the camera to one of VIEWS
 };
+
+export const NAVIGATION_HELP =
+  "Drag to look around. Scroll to zoom toward the cursor. WASD or the arrow keys move, " +
+  "Q and E go down and up, right-drag pans. Keys 1–7 jump to preset views.";
 
 export type LogEntry = {
   time: number | null;                                 // simulation time, if the simulation said it

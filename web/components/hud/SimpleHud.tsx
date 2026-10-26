@@ -3,8 +3,9 @@
 // The default view: a status pill, an about button and a toolbar, leaving the kitchen clear.
 import { useState, type CSSProperties, type ReactNode } from "react";
 import type { SimState } from "@/lib/sim";
-import { CloseIcon, FollowIcon, GamepadIcon, InfoIcon, PauseIcon, PlayIcon, ResetIcon } from "./icons";
-import { CREDITS, TONE_COLORS, statusOf, type Controls } from "./shared";
+import { CloseIcon, FollowIcon, GamepadIcon, InfoIcon, PauseIcon, PlayIcon, ResetIcon, ViewsIcon } from "./icons";
+import { VIEWS } from "@/lib/kitchen";
+import { CREDITS, NAVIGATION_HELP, TONE_COLORS, statusOf, type Controls } from "./shared";
 
 const GLASS = "rgba(20, 20, 22, 0.74)";
 
@@ -33,6 +34,7 @@ export default function SimpleHud({ state, hasFood, showHint, controls }: {
   state: SimState | null; hasFood: boolean; showHint: boolean; controls: Controls;
 }) {
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [viewsOpen, setViewsOpen] = useState(false);
   const status = statusOf(state, hasFood, controls.paused);
 
   return (
@@ -65,9 +67,7 @@ export default function SimpleHud({ state, hasFood, showHint, controls }: {
         }}>
           <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Connectome fly</div>
           {CREDITS}
-          <div style={{ marginTop: 8, opacity: 0.75 }}>
-            Drag to rotate, right-drag to pan, scroll to zoom.
-          </div>
+          <div style={{ marginTop: 8, opacity: 0.75 }}>{NAVIGATION_HELP}</div>
         </div>
       )}
 
@@ -78,7 +78,8 @@ export default function SimpleHud({ state, hasFood, showHint, controls }: {
           color: "#1f1f1f", fontSize: 14, fontWeight: 500, textAlign: "center",
           maxWidth: "calc(100vw - 32px)", boxSizing: "border-box",
         }}>
-          Click any counter, the table, a chair or the floor to drop food
+          Click any counter, the table, a chair or the floor to drop food.
+          Scroll toward a spot to get closer, or pick a view below.
         </div>
       )}
 
@@ -96,6 +97,29 @@ export default function SimpleHud({ state, hasFood, showHint, controls }: {
         <ToolButton icon={<ResetIcon />} label="Reset fly" title="Reset the fly (R)" onClick={controls.reset} />
         <ToolButton icon={<CloseIcon />} label="Remove food" disabled={!hasFood}
                     title="Remove the food (X)" onClick={controls.removeFood} />
+        <div style={{ position: "relative" }}>
+          <ToolButton icon={<ViewsIcon />} label="Views" active={viewsOpen}
+                      title="Jump to a part of the kitchen (1–7)" onClick={() => setViewsOpen((open) => !open)} />
+          {viewsOpen && (
+            <div role="menu" style={{
+              position: "absolute", bottom: 54, left: "50%", transform: "translateX(-50%)",
+              display: "flex", flexDirection: "column", padding: 6, borderRadius: 12, minWidth: 180,
+              background: "rgba(20, 20, 22, 0.88)",
+            }}>
+              {VIEWS.map((view, i) => (
+                <button key={view.name} role="menuitem"
+                        onClick={() => { controls.goToView(i); setViewsOpen(false); }} style={{
+                  display: "flex", justifyContent: "space-between", alignItems: "center", height: 40,
+                  padding: "0 12px", border: "none", borderRadius: 8, background: "transparent",
+                  color: "white", font: "500 14px var(--font-geist-sans), sans-serif", cursor: "pointer",
+                }}>
+                  {view.name}
+                  <span style={{ opacity: 0.6, font: "12px var(--font-geist-mono), monospace" }}>{i + 1}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <ToolButton icon={<GamepadIcon />} label="Game mode" title="Switch to game mode (G)"
                     onClick={controls.toggleGameMode} />
       </div>
