@@ -1,0 +1,4 @@
+data/
+*.feather
+.venv/
+__pycache__/
