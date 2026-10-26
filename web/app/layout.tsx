@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Connectome fly",
-  description: "A fly guided by a connectome-derived brain circuit finds food in a kitchen",
+  title: "Ocellus",
+  description: "A fruit fly with a brain circuit from the real fly connectome hunts for food in a kitchen",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
