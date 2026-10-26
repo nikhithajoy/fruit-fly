@@ -1,49 +1,65 @@
-// A TypeScript port of flybrain/world.py.
+// The 3D version of flybrain/world.py: an odor plume and a flying fly, in meters.
+import type { Vec3 } from "./kitchen";
 
-export type OdorSource = { x: number; y: number; peak: number; sigma: number };
+// `length` is how far (m) the smell travels before dropping to about a third.
+export type OdorSource = { x: number; y: number; z: number; peak: number; length: number };
 
-export function concentration(source: OdorSource | null, x: number, y: number): number {
+// Unlike the Gaussian in world.py, the smell falls off exponentially, so it changes by
+// the same fraction per meter everywhere in the room and the ORNs never saturate far
+// from the food.
+export function concentration(source: OdorSource | null, [x, y, z]: Vec3): number {
   if (!source) return 0;
-  const d2 = (x - source.x) ** 2 + (y - source.y) ** 2;
-  return source.peak * Math.exp(-d2 / (2 * source.sigma ** 2));
+  const d = Math.hypot(x - source.x, y - source.y, z - source.z);
+  return source.peak * Math.exp(-d / source.length);
 }
 
 export function ornRate(c: number, maxRate = 150, halfMax = 0.3): number {
   return (maxRate * c) / (c + halfMax);
 }
 
+// Unit vector for a yaw (around the vertical, 0 = facing +x) and pitch (up is positive).
+export function direction(yaw: number, pitch: number): Vec3 {
+  return [Math.cos(pitch) * Math.cos(yaw), Math.sin(pitch), -Math.cos(pitch) * Math.sin(yaw)];
+}
+
 export class Fly {
   x: number;
   y: number;
-  heading: number;
-  speed = 10;                     // mm per second
-  antennaDistance = 2;            // mm from body center
-  antennaAngle = Math.PI / 6;     // 30 degrees
+  z: number;
+  yaw: number;
+  pitch = 0;
+  antennaDistance = 0.002;        // 2 mm from body center
+  antennaAngle = Math.PI / 6;     // 30 degrees either side of the heading
 
-  constructor(x: number, y: number, heading: number) {
+  constructor([x, y, z]: Vec3, yaw: number) {
     this.x = x;
     this.y = y;
-    this.heading = heading;
+    this.z = z;
+    this.yaw = yaw;
   }
 
-  antennae(): [[number, number], [number, number]] {
-    const l = this.heading + this.antennaAngle;
-    const r = this.heading - this.antennaAngle;
-    return [
-      [this.x + this.antennaDistance * Math.cos(l), this.y + this.antennaDistance * Math.sin(l)],
-      [this.x + this.antennaDistance * Math.cos(r), this.y + this.antennaDistance * Math.sin(r)],
-    ];
+  get position(): Vec3 {
+    return [this.x, this.y, this.z];
   }
 
-  move(turnRate: number, dt: number, arenaRadius: number) {
-    this.heading += turnRate * dt;
-    this.x += this.speed * Math.cos(this.heading) * dt;
-    this.y += this.speed * Math.sin(this.heading) * dt;
-    const r = Math.hypot(this.x, this.y);
-    if (r > arenaRadius) {
-      this.x *= arenaRadius / r;
-      this.y *= arenaRadius / r;
-      this.heading = Math.atan2(-this.y, -this.x);
-    }
+  antennae(): [Vec3, Vec3] {
+    const at = (yaw: number): Vec3 => {
+      const [dx, dy, dz] = direction(yaw, this.pitch);
+      const d = this.antennaDistance;
+      return [this.x + d * dx, this.y + d * dy, this.z + d * dz];
+    };
+    return [at(this.yaw + this.antennaAngle), at(this.yaw - this.antennaAngle)];
+  }
+
+  // Where the fly would be after flying forward for dt seconds.
+  ahead(speed: number, dt: number): Vec3 {
+    const [dx, dy, dz] = direction(this.yaw, this.pitch);
+    return [this.x + speed * dt * dx, this.y + speed * dt * dy, this.z + speed * dt * dz];
+  }
+
+  moveTo([x, y, z]: Vec3) {
+    this.x = x;
+    this.y = y;
+    this.z = z;
   }
 }

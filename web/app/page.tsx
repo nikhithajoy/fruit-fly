@@ -1,245 +1,308 @@
 "use client";
 
-import { Canvas, useFrame, type ThreeEvent } from "@react-three/fiber";
-import { ContactShadows, Environment, OrbitControls } from "@react-three/drei";
-import { useEffect, useRef, useState, type MutableRefObject } from "react";
+import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
+import { Environment, OrbitControls } from "@react-three/drei";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
+import Fly from "@/components/Fly";
+import Kitchen from "@/components/Kitchen";
+import GameHud from "@/components/hud/GameHud";
+import SimpleHud from "@/components/hud/SimpleHud";
+import { CREDITS, type Controls, type LogEntry } from "@/components/hud/shared";
+import { makeRandom } from "@/lib/brain";
+import { ROOM, SURFACES, firstHit, isFree, type Vec3 } from "@/lib/kitchen";
+import type { SimState } from "@/lib/sim";
 
-type SimState = {
-  x: number; y: number; heading: number; pn: number; trend: number;
-  eating: boolean; distance: number; time: number;
-};
+const FOOD_RADIUS = 0.04;
 
-const FLY_SCALE = 3;   // draw the fly 3x life size so it's visible on the table
+// Where a click landed, if it's on a flat, upward-facing surface the food can sit on.
+function surfacePoint(event: ThreeEvent<MouseEvent | PointerEvent>): Vec3 | null {
+  if (!event.face) return null;
+  const normal = event.face.normal.clone().transformDirection(event.object.matrixWorld);
+  if (normal.y < 0.9) return null;
+  const { x, y, z } = event.point;
+  if (!isFree([x, y + FOOD_RADIUS, z], FOOD_RADIUS * 0.5)) return null;
+  return [x, y, z];
+}
 
-// ---------- the fly ----------
+// ---------- the food ----------
 
-const LEG_COLOR = "#1b1410";
-const LEGS = [
-  // side: +1 left, -1 right; spread: +1 front, 0 middle, -1 hind; tripodA: which half of the gait
-  { side: 1, spread: 1, attachX: 0.55, tripodA: true },
-  { side: 1, spread: 0, attachX: 0.4, tripodA: false },
-  { side: 1, spread: -1, attachX: 0.25, tripodA: true },
-  { side: -1, spread: 1, attachX: 0.55, tripodA: false },
-  { side: -1, spread: 0, attachX: 0.4, tripodA: true },
-  { side: -1, spread: -1, attachX: 0.25, tripodA: false },
-];
+function Food({ at }: { at: Vec3 }) {
+  const smell = useRef<THREE.Points>(null!);
+  const particles = useMemo(() => {
+    const random = makeRandom(7);
+    const positions = new Float32Array(80 * 3);
+    for (let i = 0; i < 80; i++) {
+      const r = 0.05 + random() * 0.3;
+      const angle = random() * 2 * Math.PI;
+      positions.set([r * Math.cos(angle), random() * 0.4, r * Math.sin(angle)], i * 3);
+    }
+    return positions;
+  }, []);
 
-function Segment({ from, to, radius }: { from: number[]; to: number[]; radius: number }) {
-  const a = new THREE.Vector3(...from);
-  const b = new THREE.Vector3(...to);
-  const direction = b.clone().sub(a);
-  const length = direction.length();
-  const middle = a.clone().add(b).multiplyScalar(0.5);
-  const rotation = new THREE.Quaternion().setFromUnitVectors(
-    new THREE.Vector3(0, 1, 0), direction.normalize());
+  // a wisp of smell drifting up from the fruit
+  useFrame((_, delta) => {
+    const attribute = smell.current.geometry.getAttribute("position") as THREE.BufferAttribute;
+    const array = attribute.array as Float32Array;
+    for (let i = 1; i < array.length; i += 3) array[i] = (array[i] + delta * 0.08) % 0.4;
+    attribute.needsUpdate = true;
+    smell.current.rotation.y += delta * 0.2;
+  });
+
   return (
-    <mesh position={middle} quaternion={rotation} castShadow>
-      <cylinderGeometry args={[radius, radius * 0.7, length, 6]} />
-      <meshStandardMaterial color={LEG_COLOR} roughness={0.6} />
+    <group position={at}>
+      <mesh position={[0, FOOD_RADIUS, 0]} castShadow>
+        <sphereGeometry args={[FOOD_RADIUS, 48, 48]} />
+        <meshStandardMaterial color="#b3261e" roughness={0.35} />
+      </mesh>
+      <mesh position={[0, 2 * FOOD_RADIUS + 0.008, 0]} rotation={[0, 0, 0.2]} castShadow>
+        <cylinderGeometry args={[0.0025, 0.0035, 0.022]} />
+        <meshStandardMaterial color="#5b3a1e" />
+      </mesh>
+      <points ref={smell}>
+        <bufferGeometry>
+          <bufferAttribute attach="attributes-position" args={[particles, 3]} />
+        </bufferGeometry>
+        <pointsMaterial color="#9be15d" size={0.012} transparent opacity={0.5} depthWrite={false} />
+      </points>
+    </group>
+  );
+}
+
+function PlacementMarker({ at }: { at: Vec3 }) {
+  return (
+    <mesh position={[at[0], at[1] + 0.003, at[2]]} rotation={[-Math.PI / 2, 0, 0]}>
+      <ringGeometry args={[0.035, 0.045, 32]} />
+      <meshBasicMaterial color="#9be15d" transparent opacity={0.8} />
     </mesh>
   );
 }
 
-function FlyModel({ stateRef }: { stateRef: MutableRefObject<SimState | null> }) {
-  const body = useRef<THREE.Group>(null!);
-  const legs = useRef<(THREE.Group | null)[]>([]);
+// ---------- the camera ----------
 
-  useFrame(({ clock }) => {
-    const s = stateRef.current;
-    if (!s) return;
-    body.current.position.set(s.x, 0, -s.y);
-    body.current.rotation.y = s.heading;
+const CAMERA_MARGIN = 0.15;   // m: how close the camera may get to a wall, floor or ceiling
+const CAMERA_MIN = new THREE.Vector3(...ROOM.min).addScalar(CAMERA_MARGIN);
+const CAMERA_MAX = new THREE.Vector3(...ROOM.max).subScalar(CAMERA_MARGIN);
 
-    const gait = clock.elapsedTime * 14;
-    legs.current.forEach((leg, i) => {
-      if (!leg) return;
-      const phase = LEGS[i].tripodA ? 0 : Math.PI;
-      leg.rotation.y = s.eating ? 0 : 0.35 * Math.sin(gait + phase);
-    });
+const FOLLOW_DISTANCE = 0.6;  // m: the furthest the camera sits from the fly when following
+
+// Keeps the camera inside the kitchen. When following, it slides the orbit target
+// along with the fly and, like a third-person game camera, moves in closer whenever
+// furniture (say, the tabletop) would block the view, then eases back out.
+function CameraRig({ flyPosition, follow }: { flyPosition: THREE.Vector3; follow: boolean }) {
+  const controls = useThree((state) => state.controls) as unknown as
+    { target: THREE.Vector3; update: () => void } | null;
+  const shift = useMemo(() => new THREE.Vector3(), []);
+  const offset = useMemo(() => new THREE.Vector3(), []);
+  const wanted = useRef(FOLLOW_DISTANCE);   // distance the viewer chose, by zooming
+  const placed = useRef(0);                  // distance we left the camera at last frame
+
+  useFrame(({ camera }) => {
+    if (!controls) return;
+    if (follow) {
+      shift.copy(flyPosition).sub(controls.target).multiplyScalar(0.08);
+      controls.target.add(shift);
+      camera.position.add(shift);
+
+      offset.copy(camera.position).sub(controls.target);
+      const distance = offset.length();
+      // any change since last frame came from the viewer zooming
+      if (Math.abs(distance - placed.current) > 1e-3) wanted.current = Math.min(distance, FOLLOW_DISTANCE);
+      offset.setLength(wanted.current);
+      const target = controls.target.toArray() as Vec3;
+      const ideal = controls.target.clone().add(offset).toArray() as Vec3;
+      const clear = Math.max(0.05, firstHit(target, ideal, 0.03) * wanted.current - 0.03);
+      const next = Math.min(clear, distance + 0.02);    // snap in, ease out
+      camera.position.copy(controls.target).add(offset.setLength(next));
+    }
+    camera.position.clamp(CAMERA_MIN, CAMERA_MAX);
+    controls.update();
+    placed.current = camera.position.distanceTo(controls.target);
   });
-
-  return (
-    <group ref={body} scale={FLY_SCALE}>
-      {/* head with large red compound eyes */}
-      <mesh position={[1.05, 0.62, 0]} castShadow>
-        <sphereGeometry args={[0.32, 24, 24]} />
-        <meshStandardMaterial color="#5a4632" roughness={0.5} />
-      </mesh>
-      {[1, -1].map((side) => (
-        <mesh key={side} position={[1.12, 0.7, 0.22 * side]} castShadow>
-          <sphereGeometry args={[0.22, 24, 24]} />
-          <meshStandardMaterial color="#9b1c1c" roughness={0.25} metalness={0.1} />
-        </mesh>
-      ))}
-      {/* thorax */}
-      <mesh position={[0.4, 0.62, 0]} scale={[1.2, 0.95, 0.95]} castShadow>
-        <sphereGeometry args={[0.45, 32, 32]} />
-        <meshStandardMaterial color="#6b5a43" roughness={0.6} />
-      </mesh>
-      {/* abdomen */}
-      <mesh position={[-0.55, 0.55, 0]} scale={[1.55, 0.8, 0.9]} castShadow>
-        <sphereGeometry args={[0.45, 32, 32]} />
-        <meshStandardMaterial color="#3d2f22" roughness={0.5} />
-      </mesh>
-      {/* translucent wings folded back over the abdomen */}
-      {[1, -1].map((side) => (
-        <group key={side} position={[-0.35, 0.98, 0.18 * side]} rotation={[0, 0.28 * side, 0]}>
-          <mesh rotation={[-Math.PI / 2, 0, 0]} position={[-0.6, 0, 0]} scale={[1.9, 0.6, 1]}>
-            <circleGeometry args={[0.5, 32]} />
-            <meshStandardMaterial color="#d8e6f0" transparent opacity={0.35}
-                                  side={THREE.DoubleSide} roughness={0.1} depthWrite={false} />
-          </mesh>
-        </group>
-      ))}
-      {/* six jointed legs */}
-      {LEGS.map((leg, i) => (
-        <group key={i} ref={(el) => { legs.current[i] = el; }}
-               position={[leg.attachX, 0.5, 0.25 * leg.side]}>
-          <Segment from={[0, 0, 0]} to={[0.3 * leg.spread, 0.3, 0.55 * leg.side]} radius={0.05} />
-          <Segment from={[0.3 * leg.spread, 0.3, 0.55 * leg.side]}
-                   to={[0.65 * leg.spread, -0.5, 1.0 * leg.side]} radius={0.04} />
-        </group>
-      ))}
-    </group>
-  );
-}
-
-// ---------- the world ----------
-
-function Table({ onClick }: { onClick: (e: ThreeEvent<MouseEvent>) => void }) {
-  return (
-    <group>
-      <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow onClick={onClick}>
-        <circleGeometry args={[100, 128]} />
-        <meshStandardMaterial color="#b98b5e" roughness={0.75} />
-      </mesh>
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.2, 0]} receiveShadow>
-        <planeGeometry args={[800, 800]} />
-        <meshStandardMaterial color="#2b2b2b" roughness={1} />
-      </mesh>
-    </group>
-  );
-}
-
-function Food({ x, y }: { x: number; y: number }) {
-  return (
-    <group position={[x, 0, -y]}>
-      <mesh position={[0, 5.5, 0]} castShadow>
-        <sphereGeometry args={[6, 48, 48]} />
-        <meshStandardMaterial color="#b3261e" roughness={0.35} />
-      </mesh>
-      <mesh position={[0, 12.3, 0]} rotation={[0, 0, 0.2]} castShadow>
-        <cylinderGeometry args={[0.35, 0.5, 3.2]} />
-        <meshStandardMaterial color="#5b3a1e" />
-      </mesh>
-      {/* a faint glow showing roughly where the smell spreads */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.05, 0]}>
-        <circleGeometry args={[30, 64]} />
-        <meshBasicMaterial color="#9be15d" transparent opacity={0.12} depthWrite={false} />
-      </mesh>
-    </group>
-  );
-}
-
-// ---------- the panel ----------
-
-const buttonStyle = {
-  padding: "6px 12px", border: "1px solid #888", borderRadius: 6,
-  cursor: "pointer", background: "transparent", color: "white",
-};
-
-function Panel({ state, hasFood, onRemove, onReset }: {
-  state: SimState | null; hasFood: boolean; onRemove: () => void; onReset: () => void;
-}) {
-  const pn = state?.pn ?? 0;
-  const trend = state?.trend ?? 0;
-  const status = !hasFood ? "No food: wandering"
-    : state?.eating ? "Found it: eating!"
-    : trend > 2 ? "Smell getting stronger: keep going"
-    : trend < -2 ? "Smell fading: try another direction"
-    : "Searching";
-
-  return (
-    <div style={{
-      position: "absolute", top: 16, left: 16, width: 330, padding: 16, borderRadius: 12,
-      background: "rgba(0,0,0,0.6)", color: "white", fontFamily: "sans-serif",
-      fontSize: 14, lineHeight: 1.6,
-    }}>
-      <div style={{ fontSize: 18, fontWeight: 600 }}>Connectome fly</div>
-      <div style={{ opacity: 0.8 }}>Click the table to place food. Drag to rotate, scroll to zoom.</div>
-      <hr style={{ opacity: 0.2, margin: "12px 0" }} />
-      <div>Status: {status}</div>
-      <div>Distance to food: {hasFood && state ? `${state.distance.toFixed(0)} mm` : "–"}</div>
-      <div style={{ marginTop: 8 }}>Vinegar projection neurons: {pn.toFixed(0)} Hz</div>
-      <div style={{ height: 8, background: "#333", borderRadius: 4 }}>
-        <div style={{ width: `${Math.min(100, (pn / 220) * 100)}%`, height: "100%",
-                      background: "#9be15d", borderRadius: 4 }} />
-      </div>
-      <div>Trend: {trend.toFixed(1)}</div>
-      <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
-        <button style={buttonStyle} onClick={onRemove}>Remove food</button>
-        <button style={buttonStyle} onClick={onReset}>Reset fly</button>
-      </div>
-      <div style={{ marginTop: 12, fontSize: 11, opacity: 0.6 }}>
-        The fly smells with a 625-neuron circuit extracted from the MaleCNS connectome
-        (CC-BY 4.0), running live in your browser. A simple run-and-tumble rule turns
-        its signal into movement.
-      </div>
-    </div>
-  );
+  return null;
 }
 
 // ---------- the page ----------
 
+const TRAIL_LENGTH = 150;    // mini-map trail points, sampled 10 times a second
+const LOG_LENGTH = 200;      // console lines kept
+
+const HELP = "Commands: pause, resume, follow, unfollow, reset, drop food <place>, remove food, " +
+  `clear, about, exit. Places: ${SURFACES.map((s) => s.name).join(", ")}.`;
+
 export default function Home() {
   const stateRef = useRef<SimState | null>(null);
   const workerRef = useRef<Worker | null>(null);
-  const [food, setFood] = useState<[number, number] | null>(null);
+  const eventsRef = useRef<LogEntry[]>([]);    // simulation events not yet shown
+  const trailRef = useRef<Vec3[]>([]);
+  const flyPosition = useMemo(() => new THREE.Vector3(), []);
+  const [food, setFood] = useState<Vec3 | null>(null);
+  const [placedOnce, setPlacedOnce] = useState(false);
+  const [hover, setHover] = useState<Vec3 | null>(null);
+  const [follow, setFollow] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const [gameMode, setGameMode] = useState(false);
+  const [consoleOpen, setConsoleOpen] = useState(true);
   const [panelState, setPanelState] = useState<SimState | null>(null);
+  const [trail, setTrail] = useState<Vec3[]>([]);
+  const [log, setLog] = useState<LogEntry[]>([]);
 
   useEffect(() => {
     const worker = new Worker(new URL("../lib/sim.worker.ts", import.meta.url), { type: "module" });
-    worker.onmessage = (event) => { stateRef.current = event.data; };
+    worker.onmessage = (event: MessageEvent<SimState>) => {
+      stateRef.current = event.data;
+      eventsRef.current.push(...event.data.events);
+    };
     workerRef.current = worker;
-    const timer = setInterval(() => setPanelState(stateRef.current), 100);
+    const timer = setInterval(() => {
+      const s = stateRef.current;
+      setPanelState(s);
+      if (s) {
+        const points = trailRef.current;
+        const last = points[points.length - 1];
+        const moved = last ? Math.hypot(s.x - last[0], s.y - last[1], s.z - last[2]) : Infinity;
+        if (moved > 0.5) points.length = 0;        // the fly was reset: start a new trail
+        if (moved > 0.02) {
+          points.push([s.x, s.y, s.z]);
+          if (points.length > TRAIL_LENGTH) points.shift();
+          setTrail([...points]);
+        }
+      }
+      const fresh = eventsRef.current.splice(0);
+      if (fresh.length) setLog((lines) => [...lines, ...fresh].slice(-LOG_LENGTH));
+    }, 100);
     return () => { worker.terminate(); clearInterval(timer); };
   }, []);
 
+  const post = (message: object) => workerRef.current?.postMessage(message);
+
+  function dropFood(at: Vec3) {
+    setFood(at);
+    setPlacedOnce(true);
+    post({ type: "food", x: at[0], y: at[1], z: at[2] });
+  }
+
+  function removeFood() {
+    if (!food) return;
+    setFood(null);
+    post({ type: "remove-food" });
+  }
+
+  function setPausedTo(value: boolean) {
+    setPaused(value);
+    post({ type: value ? "pause" : "resume" });
+  }
+
+  const controls: Controls = {
+    paused,
+    follow,
+    togglePause: () => setPausedTo(!paused),
+    toggleFollow: () => setFollow((f) => !f),
+    reset: () => post({ type: "reset" }),
+    removeFood,
+    toggleGameMode: () => setGameMode((g) => !g),
+  };
+
+  function addLog(...entries: LogEntry[]) {
+    setLog((lines) => [...lines, ...entries].slice(-LOG_LENGTH));
+  }
+  const say = (text: string) => addLog({ time: null, source: "system", text });
+
+  function runCommand(input: string) {
+    const text = input.trim().toLowerCase().replace(/\s+/g, " ");
+    if (!text) return;
+    addLog({ time: null, source: "you", text: input.trim() });
+
+    const place = text.match(/^(?:drop|place|put)(?: food)?(?: on)?(?: the)? (.+)$/)?.[1];
+    if (place) {
+      const surface = SURFACES.find((s) => s.name === place);
+      if (surface) dropFood(surface.spot);
+      else say(`There's no "${place}". Try: ${SURFACES.map((s) => s.name).join(", ")}.`);
+      return;
+    }
+    switch (text) {
+      case "help": return say(HELP);
+      case "pause": setPausedTo(true); return say("Simulation paused.");
+      case "resume": case "play": setPausedTo(false); return say("Simulation resumed.");
+      case "follow": setFollow(true); return say("Camera following the fly.");
+      case "unfollow": setFollow(false); return say("Camera free.");
+      case "reset": return controls.reset();
+      case "remove food": case "remove": return food ? removeFood() : say("There's no food to remove.");
+      case "drop": case "drop food": return say("Where? For example: drop food table");
+      case "clear": return setLog([]);
+      case "about": return say(CREDITS);
+      case "exit": return setGameMode(false);
+      default: return say(`Unknown command "${text}". Type help.`);
+    }
+  }
+
+  // Keyboard shortcuts, ignored while typing in the console.
+  const onKeyDown = useEffectEvent((e: KeyboardEvent) => {
+    const target = e.target as HTMLElement;
+    if (target.tagName === "INPUT") {
+      if (e.key === "Escape") target.blur();
+      return;
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const key = e.key.toLowerCase();
+    if (key === " ") {
+      e.preventDefault();
+      controls.togglePause();
+    }
+    else if (key === "f") controls.toggleFollow();
+    else if (key === "r") controls.reset();
+    else if (key === "x") removeFood();
+    else if (key === "g") controls.toggleGameMode();
+    else if (key === "`" && gameMode) setConsoleOpen((open) => !open);
+    else if (key === "enter" && gameMode && consoleOpen) document.getElementById("console-input")?.focus();
+  });
+  useEffect(() => {
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   function placeFood(event: ThreeEvent<MouseEvent>) {
-    console.log("table clicked", event.point, "drag distance:", event.delta);
-    if (event.delta > 3) return;        // ignore the end of a drag
     if (event.delta > 3) return;        // ignore the end of a drag
     event.stopPropagation();
-    const x = event.point.x;
-    const y = -event.point.z;
-    if (Math.hypot(x, y) > 92) return;  // keep the food on the table
-    setFood([x, y]);
-    workerRef.current?.postMessage({ type: "food", x, y });
+    const at = surfacePoint(event);
+    if (at) dropFood(at);
+  }
+
+  function hoverSurface(event: ThreeEvent<PointerEvent> | null) {
+    if (event) event.stopPropagation();
+    setHover(event ? surfacePoint(event) : null);
   }
 
   return (
-    <main style={{ width: "100vw", height: "100vh", position: "relative", background: "#111" }}>
-      <Canvas shadows camera={{ position: [0, 150, 150], fov: 45 }}>
+    <main style={{ width: "100vw", height: "100vh", position: "relative", background: "#111",
+                   overflow: "hidden", cursor: hover ? "pointer" : "default" }}>
+      <Canvas shadows camera={{ position: [1.8, 2.0, 1.3], fov: 60, near: 0.01, far: 20 }}>
+        <color attach="background" args={["#f1ead9"]} />
         <ambientLight intensity={0.35} />
-        <directionalLight position={[60, 140, 40]} intensity={1.6} castShadow
-                          shadow-mapSize={[2048, 2048]}
-                          shadow-camera-left={-120} shadow-camera-right={120}
-                          shadow-camera-top={120} shadow-camera-bottom={-120} />
-        <Environment preset="apartment" />
-        <Table onClick={placeFood} />
-        {food && <Food x={food[0]} y={food[1]} />}
-        <FlyModel stateRef={stateRef} />
-        <ContactShadows position={[0, 0.06, 0]} opacity={0.45} scale={220} blur={2.5} far={15} />
-        <OrbitControls target={[0, 0, 0]} maxPolarAngle={Math.PI / 2.2}
-                       minDistance={25} maxDistance={400} />
+        <hemisphereLight args={["#fff8ee", "#8a7a66", 0.5]} />
+        <directionalLight position={[-1.5, 4, 3]} intensity={1.4} castShadow
+                          shadow-mapSize={[2048, 2048]} shadow-bias={-0.0005}
+                          shadow-camera-left={-4} shadow-camera-right={4}
+                          shadow-camera-top={4} shadow-camera-bottom={-4} />
+        <Environment preset="apartment" environmentIntensity={0.4} />
+        <Kitchen onClick={placeFood} onHover={hoverSurface} />
+        {hover && <PlacementMarker at={hover} />}
+        {food && <Food at={food} />}
+        <Fly stateRef={stateRef} position={flyPosition} paused={paused} />
+        <OrbitControls makeDefault target={[-0.3, 0.8, -0.6]} maxPolarAngle={Math.PI / 2.05}
+                       minDistance={follow ? 0.05 : 0.15} maxDistance={4} />
+        <CameraRig flyPosition={flyPosition} follow={follow} />
       </Canvas>
-      <Panel
-        state={panelState}
-        hasFood={food !== null}
-        onRemove={() => { setFood(null); workerRef.current?.postMessage({ type: "remove-food" }); }}
-        onReset={() => workerRef.current?.postMessage({ type: "reset" })}
-      />
+      {/* the HUD lets clicks through to the kitchen except on its own panels */}
+      <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+        {gameMode ? (
+          <GameHud state={panelState} hasFood={food !== null} food={food} trail={trail} log={log}
+                   consoleOpen={consoleOpen} onToggleConsole={() => setConsoleOpen((open) => !open)}
+                   onCommand={runCommand} controls={controls} />
+        ) : (
+          <SimpleHud state={panelState} hasFood={food !== null} showHint={!placedOnce} controls={controls} />
+        )}
+      </div>
     </main>
   );
 }
