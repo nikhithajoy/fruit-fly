@@ -1,4 +1,4 @@
-# Ocellus
+# Ocellus: a fruit fly simulator
 
 A fruit fly whose sense of smell is a spiking model of its real brain wiring, hunting for food in a 3D kitchen in your browser.
 
