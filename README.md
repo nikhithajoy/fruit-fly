@@ -134,3 +134,7 @@ From there, the pipeline is:
 - **Connectome:** MaleCNS v1.0. Berg et al., *Cell* 2026, from HHMI Janelia, the University of Cambridge, MRC LMB and Google Research. Licensed under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 - **Neuron model parameters:** Shiu et al., "A *Drosophila* computational brain model reveals sensorimotor processing", *Nature* 2024.
 - **Web stack:** [Next.js](https://nextjs.org), [three.js](https://threejs.org) and [React Three Fiber](https://r3f.docs.pmnd.rs).
+
+## License
+
+The code is released under the [MIT License](LICENSE). Data derived from the MaleCNS connectome, including the exported circuit in `exports/` and `web/public/brain/` and the files in `results/`, stays under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) and must credit the MaleCNS authors. See [LICENSE](LICENSE) for details.
