@@ -128,26 +128,6 @@ From there, the pipeline is:
 | Reduce to the vinegar circuit | `sims/reduce_brain.py` | `data/active_neurons.npy` |
 | Export for the web | `sims/export_brain.py` | `exports/vinegar_circuit.json`; copy it to `web/public/brain/` |
 
-## Project layout
-
-```
-flybrain/              Python simulator
-  brain.py             leaky integrate-and-fire network over the connectome
-  calibrate.py         rules that make the raw connectome simulation-ready
-  world.py             2D arena, odor source and fly body
-sims/                  experiments, calibration, reduction and export scripts
-notebooks/             data exploration
-results/               figures, recordings and calibration tables
-exports/               the reduced circuit as JSON
-web/                   the Next.js app
-  lib/brain.ts         TypeScript port of brain.py
-  lib/sim.ts           brain + 3D world + run-and-tumble, stepped together (testable in Node)
-  lib/sim.worker.ts    runs the simulation in a Web Worker
-  lib/kitchen.ts       room and furniture layout, shared by rendering, collisions and the mini-map
-  lib/world.ts         3D odor plume and fly body
-  components/          kitchen, fly, and the two HUDs
-  app/page.tsx         scene, camera, controls and console commands
-```
 
 ## Credits
 
