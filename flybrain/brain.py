@@ -62,6 +62,21 @@ class Brain:
         if side is not None:
             mask &= self.neurons[side_column] == side
         return np.flatnonzero(mask.to_numpy())
+    
+    def subset(self, keep):
+        """A new Brain containing only the neurons at positions `keep`."""
+        keep = np.asarray(keep)
+        small = object.__new__(Brain)
+        small.neurons = self.neurons.iloc[keep].reset_index(drop=True)
+        small.calibration = self.calibration
+        small.W = self.W[keep][:, keep].tocsr()
+        small.n = len(keep)
+        small.rng = np.random.default_rng(0)
+        small.delay_steps = self.delay_steps
+        small.ref_steps = self.ref_steps
+        small.input_neurons = np.array([], dtype=np.int64)
+        small.reset()
+        return small
 
     def step(self, duration_ms, input_rates=None):
         """Run the brain forward and return each neuron's spike count.
