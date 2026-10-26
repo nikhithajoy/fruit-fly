@@ -10,7 +10,7 @@ import GameHud from "@/components/hud/GameHud";
 import SimpleHud from "@/components/hud/SimpleHud";
 import { CREDITS, type Controls, type LogEntry } from "@/components/hud/shared";
 import { makeRandom } from "@/lib/brain";
-import { ROOM, SURFACES, VIEWS, firstHit, isFree, type Vec3 } from "@/lib/kitchen";
+import { ROOM, SURFACES, VIEWS, boxCenter, firstHit, isFree, type Vec3 } from "@/lib/kitchen";
 import type { SimState } from "@/lib/sim";
 
 const FOOD_RADIUS = 0.04;
@@ -84,7 +84,21 @@ const CAMERA_MARGIN = 0.15;   // m: how close the camera may get to a wall, floo
 const CAMERA_MIN = new THREE.Vector3(...ROOM.min).addScalar(CAMERA_MARGIN);
 const CAMERA_MAX = new THREE.Vector3(...ROOM.max).subScalar(CAMERA_MARGIN);
 
-const FOLLOW_DISTANCE = 0.6;  // m: the furthest the camera sits from the fly when following
+const FOLLOW_DISTANCE = 1.0;  // m: the furthest the camera sits from the fly when following
+const FOLLOW_MIN = 0.15;      // m: the closest the viewer can zoom in while following
+const FOLLOW_MIN_ROOM = 0.6;  // m: less room than this behind the fly, and the camera swings round
+const ROOM_CENTER = new THREE.Vector3(...boxCenter(ROOM));
+
+// How far the camera can go from p along a unit direction before leaving the room.
+function roomLeft(p: THREE.Vector3, direction: THREE.Vector3): number {
+  let t = Infinity;
+  for (const axis of ["x", "y", "z"] as const) {
+    const d = direction[axis];
+    if (d > 1e-6) t = Math.min(t, (CAMERA_MAX[axis] - p[axis]) / d);
+    else if (d < -1e-6) t = Math.min(t, (CAMERA_MIN[axis] - p[axis]) / d);
+  }
+  return Math.max(0, t);
+}
 
 const MOVE_SPEED = 1.2;       // m/s when moving with the keyboard
 // [forward, right, up] for each movement key
@@ -115,6 +129,7 @@ function CameraRig({ flyPosition, follow, view, onManualMove }: {
   const canvas = useThree((state) => state.gl.domElement);
   const shift = useMemo(() => new THREE.Vector3(), []);
   const offset = useMemo(() => new THREE.Vector3(), []);
+  const toCenter = useMemo(() => new THREE.Vector3(), []);
   const forward = useMemo(() => new THREE.Vector3(), []);
   const right = useMemo(() => new THREE.Vector3(), []);
   const move = useMemo(() => new THREE.Vector3(), []);
@@ -192,11 +207,21 @@ function CameraRig({ flyPosition, follow, view, onManualMove }: {
       offset.copy(camera.position).sub(controls.target);
       const distance = offset.length();
       // any change since last frame came from the viewer zooming
-      if (Math.abs(distance - placed.current) > 1e-3) wanted.current = Math.min(distance, FOLLOW_DISTANCE);
-      offset.setLength(wanted.current);
+      if (Math.abs(distance - placed.current) > 1e-3) {
+        wanted.current = Math.min(Math.max(distance, FOLLOW_MIN), FOLLOW_DISTANCE);
+      }
+      offset.normalize();
+      // Near a wall, floor or ceiling there's no room behind the fly: swing the camera
+      // round toward the middle of the room, a little above, so the kitchen is in view.
+      if (roomLeft(controls.target, offset) < FOLLOW_MIN_ROOM) {
+        toCenter.copy(ROOM_CENTER).sub(controls.target).setY(0).normalize().setY(0.6).normalize();
+        offset.lerp(toCenter, 0.06).normalize();
+      }
+      const reach = Math.min(wanted.current, roomLeft(controls.target, offset));
+      offset.multiplyScalar(reach);
       const target = controls.target.toArray() as Vec3;
       const ideal = controls.target.clone().add(offset).toArray() as Vec3;
-      const clear = Math.max(0.05, firstHit(target, ideal, 0.03) * wanted.current - 0.03);
+      const clear = Math.max(0.05, firstHit(target, ideal, 0.03) * reach - 0.03);
       const next = Math.min(clear, distance + 0.02);    // snap in, ease out
       camera.position.copy(controls.target).add(offset.setLength(next));
     }
